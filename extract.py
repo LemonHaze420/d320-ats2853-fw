@@ -27,6 +27,23 @@ def long_name(entries):
     return raw.decode("utf-16-le").split("\0", 1)[0].rstrip("\uffff")
 
 
+def extract_sdfs(data):
+    if data[:12] != b"sdfs.bin\0\0\0\0":
+        raise ValueError("invalid sdfs signature")
+    count, size = struct.unpack_from("<II", data, 12)
+    if size != len(data) or not 1 <= count <= 256 or (count + 1) * 32 > len(data):
+        raise ValueError("invalid sdfs directory")
+    files = {}
+    for index in range(1, count + 1):
+        entry = data[index * 32:(index + 1) * 32]
+        name = entry[:12].split(b"\0", 1)[0].decode("ascii")
+        offset, length = struct.unpack_from("<II", entry, 12)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in files or offset < (count + 1) * 32 or offset + length > len(data):
+            raise ValueError("invalid sdfs entry")
+        files[name] = data[offset:offset + length]
+    return files
+
+
 def extract(source, destination):
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("destination is not empty")
@@ -49,7 +66,7 @@ def extract(source, destination):
             raise ValueError(name)
         outer[name] = blob
 
-    att = outer.pop("attdfu.fw")
+    att = outer["attdfu.fw"]
     if not att.startswith(b"100TMFWFSTCA"):
         raise ValueError("invalid attdfu.fw")
     nested = {}
@@ -77,19 +94,21 @@ def extract(source, destination):
             raise ValueError("invalid nested entry")
         nested[name] = att[start:start + size]
 
-    files = {}
+    outer_files = {}
     for name, blob in outer.items():
         decoded = decode.decode(blob) if name in IMAGES else blob
         if name in IMAGES and not decoded.startswith(IMAGES[name]):
             raise ValueError(name)
-        files[name] = decoded
+        outer_files[name] = decoded
+    nested_files = {}
     for name, blob in nested.items():
         decoded = bytes(value ^ 0x38 for value in blob)
         if name in outer:
             if decoded != outer[name]:
                 raise ValueError(name)
+            decoded = outer_files[name]
         elif name == "sdfs_ori.bin":
-            if decoded != files["sdfs.bin"]:
+            if decoded != outer_files["sdfs.bin"]:
                 raise ValueError(name)
         elif name == "FIRMWARE":
             if decoded != b"DUMMY FILE for card product":
@@ -99,23 +118,19 @@ def extract(source, destination):
                 decoded = unwrap.decode(blob)
                 if not (decoded.startswith(b"MZ") or decoded.startswith(bytes.fromhex("03f30d0a"))):
                     raise ValueError(name)
-            files[name] = decoded
+        nested_files[name] = decoded
 
-    sdfs = files["sdfs.bin"]
-    count, size = struct.unpack_from("<II", sdfs, 12)
-    if size != len(sdfs) or not 1 <= count <= 256:
-        raise ValueError("invalid sdfs.bin")
-    for index in range(1, count):
-        entry = sdfs[index * 32:(index + 1) * 32]
-        name = entry[:12].split(b"\0", 1)[0].decode("ascii")
-        offset, length = struct.unpack_from("<II", entry, 12)
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in files or offset < count * 32 or offset + length > len(sdfs):
-            raise ValueError("invalid sdfs entry")
-        files[name] = sdfs[offset:offset + length]
+    sdfs_files = extract_sdfs(outer_files["sdfs.bin"])
+    card_files = (("att_card_sdfs", extract_sdfs(nested_files["att_card_sdfs.bin"])),
+                  ("sp_card_sdfs", extract_sdfs(nested_files["sp_card_sdfs.bin"])))
 
     destination.mkdir(parents=True, exist_ok=True)
-    for name, blob in files.items():
-        (destination / name).write_bytes(blob)
+    for folder, entries in (("outer", outer_files), ("attdfu", nested_files),
+                            ("sdfs", sdfs_files), *card_files):
+        target = destination / folder
+        target.mkdir()
+        for name, blob in entries.items():
+            (target / name).write_bytes(blob)
 
 
 if __name__ == "__main__":
