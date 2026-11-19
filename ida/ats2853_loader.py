@@ -1,10 +1,9 @@
 from hashlib import sha256
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from shutil import rmtree
 from struct import unpack_from
-import sys
 
+import extract
 import ida_auto
 import ida_entry
 import ida_ida
@@ -93,7 +92,7 @@ class FirmwareInput:
         return self.data
 
 
-def extract_beside_input(li, extractor):
+def extract_beside_input(li):
     filename = ida_nalt.get_input_file_path()
     if not filename or not Path(filename).is_file():
         raise ValueError("Open the firmware from a local file")
@@ -111,31 +110,12 @@ def extract_beside_input(li, extractor):
         raise ValueError(f"Extraction folder already exists for different or incomplete firmware: {out}") from None
 
     try:
-        extractor.extract(firmware, out)
+        extract.extract(firmware, out)
         marker.write_text(digest + "\n", encoding="ascii")
     except Exception:
         rmtree(out)
         raise
     return out
-
-
-def read_module(directory, name):
-    spec = spec_from_file_location(f"_ats2853_{name}", directory / f"{name}.py")
-    module = module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def read_extractor(directory):
-    dependencies = {name: read_module(directory, name) for name in ("decode", "unwrap")}
-    previous = {name: sys.modules[name] for name in dependencies if name in sys.modules}
-    sys.modules.update(dependencies)
-    try:
-        return read_module(directory, "extract")
-    finally:
-        for name in dependencies:
-            sys.modules.pop(name)
-        sys.modules.update(previous)
 
 
 def add_segment(name, start, size, kind, permissions):
@@ -205,17 +185,9 @@ def map_profile(profile, out):
 def load_file(li, neflags, format):
     try:
         profile = FORMATS[format]
-        directory = Path(__file__).resolve().parent
-        support = directory / "ats2853_support"
-        if support.is_dir():
-            directory = support
-        elif not (directory / "extract.py").is_file():
-            directory = directory.parent
-
-        extractor = read_extractor(directory)
         if not ida_idp.set_processor_type("mipsl", ida_idp.SETPROC_LOADER):
             raise RuntimeError("Could not select little-endian MIPS")
-        map_profile(profile, extract_beside_input(li, extractor))
+        map_profile(profile, extract_beside_input(li))
     except (KeyError, OSError, RuntimeError, ValueError) as error:
         ida_kernwin.msg(f"ATS2853 loader: {error}\n")
         return 0
