@@ -209,6 +209,8 @@ def load_file(li, neflags, format):
         support = directory / "ats2853_support"
         if support.is_dir():
             directory = support
+        elif not (directory / "extract.py").is_file():
+            directory = directory.parent
 
         extractor = read_extractor(directory)
         if not ida_idp.set_processor_type("mipsl", ida_idp.SETPROC_LOADER):
